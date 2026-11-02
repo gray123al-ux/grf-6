@@ -7,7 +7,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 
 # --------------------------------------------------
-# Page configuration
+# PAGE CONFIGURATION
 # --------------------------------------------------
 st.set_page_config(
     page_title="Dividing Movie Types",
@@ -18,13 +18,13 @@ st.set_page_config(
 st.title("🎬 Dividing Movie Types")
 st.caption(
     "Discover different movie types by grouping films "
-    "with similar characteristics, without a fixed answer column."
+    "with similar characteristics."
 )
 
 # --------------------------------------------------
-# Settings
+# SETTINGS
 # --------------------------------------------------
-MOVIES_URL = (
+DATA_URL = (
     "https://raw.githubusercontent.com/it-teacher-go/"
     "data-share-/main/kobis_movies.csv"
 )
@@ -46,23 +46,31 @@ ORIGINAL_COLUMNS = [
 ]
 
 # --------------------------------------------------
-# Load data
+# LOAD DATA
 # --------------------------------------------------
 @st.cache_data
-def load_data():
-    df = pd.read_csv(MOVIES_URL, dtype={"movieCd": str})
+def load_data(url):
+
+    df = pd.read_csv(url, dtype={"movieCd": str})
 
     total_movies = len(df)
 
     required_columns = [
+        "movieNm",
         "first_scrn",
         "total_audi",
         "days_in_top10",
-        "first_week_audi",
-        "movieNm"
+        "first_week_audi"
     ]
 
-    df = df.dropna(subset=required_columns).copy()
+    missing_columns = [
+        col for col in required_columns if col not in df.columns
+    ]
+
+    if missing_columns:
+        raise ValueError(
+            f"Missing columns in CSV: {missing_columns}"
+        )
 
     numeric_columns = [
         "first_scrn",
@@ -74,7 +82,7 @@ def load_data():
     for col in numeric_columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df = df.dropna(subset=numeric_columns)
+    df = df.dropna(subset=required_columns).copy()
 
     df = df[
         (df["first_scrn"] > 0) &
@@ -85,47 +93,58 @@ def load_data():
 
     df = df.sort_values("movieCd").reset_index(drop=True)
 
+    # Original attributes
+    df["Number of Screens"] = df["first_scrn"]
+    df["Cumulative Audience"] = df["total_audi"]
+    df["Days in Top 10"] = df["days_in_top10"]
+
+    df["Long Run Index"] = (
+        df["total_audi"] / df["first_week_audi"]
+    ).clip(upper=20)
+
+    # FIX: Use NumPy instead of math.log10()
+    df["log_first_scrn"] = np.log10(
+        df["first_scrn"].where(df["first_scrn"] > 0)
+    )
+
+    df["log_total_audi"] = np.log10(
+        df["total_audi"].where(df["total_audi"] > 0)
+    )
+
+    # Display-friendly attribute names
+    df["Number of Screens (Log)"] = df["log_first_scrn"]
+    df["Cumulative Audience (Log)"] = df["log_total_audi"]
+
     return df, total_movies
 
 
+# --------------------------------------------------
+# DATA LOADING
+# --------------------------------------------------
 try:
-    df, total_movies = load_data()
+    df, total_movies = load_data(DATA_URL)
+
 except Exception as e:
-    st.error(f"Could not load the movie data: {e}")
+    st.error(f"Unable to load movie data: {e}")
     st.stop()
 
 if len(df) < 7:
-    st.error("Not enough movies to perform clustering.")
+    st.error("Not enough valid movie records for clustering.")
     st.stop()
 
-# --------------------------------------------------
-# Create four attributes
-# --------------------------------------------------
-df["Number of Screens"] = df["first_scrn"]
-df["Cumulative Audience"] = df["total_audi"]
-df["Days in Top 10"] = df["days_in_top10"]
-
-df["Long Run Index"] = (
-    df["total_audi"] / df["first_week_audi"]
-).clip(upper=20)
-
-df["Number of Screens (Log)"] = np.log10(df["first_scrn"])
-df["Cumulative Audience (Log)"] = np.log10(df["total_audi"])
-
 st.info(
-    f"Analyzing **{len(df):,} movies** out of "
-    f"**{total_movies:,} original records**. "
-    "Movies without the required data are excluded."
+    f"Using **{len(df):,} movies** out of "
+    f"**{total_movies:,} original records**."
 )
 
 # --------------------------------------------------
-# Attribute selection
+# CLUSTERING SETTINGS
 # --------------------------------------------------
-st.subheader("⚙️ Clustering Settings")
+st.header("⚙️ Clustering Settings")
 
 selected_attributes = st.multiselect(
-    "Select attributes for grouping (at least two)",
-    ATTRIBUTE_LABELS,
+    "Select attributes for grouping",
+    options=ATTRIBUTE_LABELS,
     default=ATTRIBUTE_LABELS
 )
 
@@ -133,21 +152,18 @@ if len(selected_attributes) < 2:
     st.warning("Please select at least two attributes.")
     st.stop()
 
-# --------------------------------------------------
-# Number of clusters
-# --------------------------------------------------
 k = st.slider(
     "Number of movie groups",
     min_value=2,
     max_value=7,
     value=3,
-    help="Choose how many different movie types to discover."
+    step=1
 )
 
 # --------------------------------------------------
-# K-means clustering
+# K-MEANS CLUSTERING
 # --------------------------------------------------
-X = df[selected_attributes].copy()
+X = df[selected_attributes].to_numpy()
 
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
@@ -162,8 +178,8 @@ cluster_numbers = model.fit_predict(X_scaled)
 
 # Sort groups by average cumulative audience
 cluster_order = (
-    df.assign(_cluster=cluster_numbers)
-    .groupby("_cluster")["Cumulative Audience"]
+    df.assign(cluster=cluster_numbers)
+    .groupby("cluster")["Cumulative Audience"]
     .mean()
     .sort_values(ascending=False)
     .index
@@ -182,35 +198,32 @@ df["Bundle"] = [
 active_symbols = SYMBOLS[:k]
 
 # --------------------------------------------------
-# Summary metrics
+# OVERVIEW
 # --------------------------------------------------
 st.divider()
-st.subheader("📊 Movie Group Overview")
+st.header("📊 Movie Group Overview")
 
-metric_columns = st.columns(3)
+c1, c2, c3 = st.columns(3)
 
-metric_columns[0].metric("Total Movies", f"{len(df):,}")
-metric_columns[1].metric("Number of Groups", k)
-metric_columns[2].metric(
-    "Selected Attributes",
-    f"{len(selected_attributes)} / 4"
-)
+c1.metric("Total Movies", f"{len(df):,}")
+c2.metric("Number of Groups", k)
+c3.metric("Selected Attributes", f"{len(selected_attributes)} / 4")
 
 # --------------------------------------------------
-# 2D scatter plot
+# 2D SCATTER PLOT
 # --------------------------------------------------
 st.divider()
-st.subheader("🗺️ Bundle Map · 2D")
+st.header("🗺️ Bundle Map · 2D")
 
-c1, c2 = st.columns(2)
+col1, col2 = st.columns(2)
 
-x_axis = c1.selectbox(
+x_axis = col1.selectbox(
     "Horizontal Axis",
     ATTRIBUTE_LABELS,
     index=0
 )
 
-y_axis = c2.selectbox(
+y_axis = col2.selectbox(
     "Vertical Axis",
     ATTRIBUTE_LABELS,
     index=1
@@ -228,7 +241,9 @@ fig = px.scatter(
         "Days in Top 10": True,
         "Long Run Index": ":.2f"
     },
-    category_orders={"Bundle": active_symbols},
+    category_orders={
+        "Bundle": active_symbols
+    },
     color_discrete_sequence=px.colors.qualitative.Bold
 )
 
@@ -238,26 +253,31 @@ fig.update_traces(
 
 fig.update_layout(
     height=480,
-    legend_title="Movie Group",
-    template="plotly_dark"
+    template="plotly_dark",
+    legend_title="Movie Group"
 )
 
 st.plotly_chart(fig, width="stretch")
 
 st.caption(
     "Each dot represents one movie. "
-    "Change the axes to explore how the groups differ."
+    "Change the axes to explore differences between groups."
 )
 
 # --------------------------------------------------
-# 3D scatter plot
+# 3D SCATTER PLOT
 # --------------------------------------------------
 st.divider()
-st.subheader("🌐 Bundle Map · 3D")
+st.header("🌐 Bundle Map · 3D")
 
 if len(selected_attributes) < 3:
-    st.info("Select at least three attributes to display the 3D plot.")
+
+    st.info(
+        "Select at least three attributes to display the 3D map."
+    )
+
 else:
+
     d1, d2, d3 = st.columns(3)
 
     x3 = d1.selectbox(
@@ -282,8 +302,13 @@ else:
     )
 
     if len({x3, y3, z3}) < 3:
-        st.warning("Please select three different attributes.")
+
+        st.warning(
+            "Please select three different attributes."
+        )
+
     else:
+
         fig3 = px.scatter_3d(
             df,
             x=x3,
@@ -291,7 +316,9 @@ else:
             z=z3,
             color="Bundle",
             hover_name="movieNm",
-            category_orders={"Bundle": active_symbols},
+            category_orders={
+                "Bundle": active_symbols
+            },
             color_discrete_sequence=px.colors.qualitative.Bold
         )
 
@@ -308,15 +335,15 @@ else:
         st.plotly_chart(fig3, width="stretch")
 
         st.caption(
-            "Drag to rotate the 3D chart. "
-            "Hover over a point to see the movie title."
+            "Drag to rotate the 3D map. "
+            "Hover over a point to see its movie title."
         )
 
 # --------------------------------------------------
-# Group statistics
+# GROUP STATISTICS
 # --------------------------------------------------
 st.divider()
-st.subheader("📋 Group Statistics")
+st.header("📋 Group Statistics")
 
 summary = (
     df.groupby("Bundle")[ORIGINAL_COLUMNS]
@@ -360,17 +387,16 @@ st.dataframe(
 )
 
 st.caption(
-    "Values are displayed in their original units, "
-    "before logarithmic transformation. "
+    "Statistics are calculated using original units. "
     "The Long Run Index is cumulative audience divided by "
     "first-week audience, capped at 20."
 )
 
 # --------------------------------------------------
-# Top 5 movies in each group
+# TOP 5 MOVIES IN EACH GROUP
 # --------------------------------------------------
 st.divider()
-st.subheader("🏆 Top 5 Movies in Each Group")
+st.header("🏆 Top 5 Movies in Each Group")
 
 columns = st.columns(k)
 
@@ -378,46 +404,46 @@ for i, symbol in enumerate(active_symbols):
 
     group = (
         df[df["Bundle"] == symbol]
-        .sort_values("Cumulative Audience", ascending=False)
+        .sort_values(
+            "Cumulative Audience",
+            ascending=False
+        )
         .head(5)
     )
 
     count = (df["Bundle"] == symbol).sum()
 
-    columns[i].markdown(
-        f"### {symbol} Group"
-    )
+    with columns[i]:
 
-    columns[i].caption(
-        f"{count:,} movies"
-    )
+        st.subheader(f"{symbol} Group")
+        st.caption(f"{count:,} movies")
 
-    display = group[
-        ["movieNm", "Cumulative Audience"]
-    ].rename(
-        columns={
-            "movieNm": "Movie",
-            "Cumulative Audience": "Audience"
-        }
-    )
+        display = group[
+            ["movieNm", "Cumulative Audience"]
+        ].rename(
+            columns={
+                "movieNm": "Movie",
+                "Cumulative Audience": "Audience"
+            }
+        )
 
-    columns[i].dataframe(
-        display,
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "Audience": st.column_config.NumberColumn(
-                "Audience",
-                format="%,d"
-            )
-        }
-    )
+        st.dataframe(
+            display,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Audience": st.column_config.NumberColumn(
+                    "Audience",
+                    format="%,d"
+                )
+            }
+        )
 
 # --------------------------------------------------
-# Download results
+# DOWNLOAD
 # --------------------------------------------------
 st.divider()
-st.subheader("📥 Download Results")
+st.header("📥 Download Results")
 
 csv = df.to_csv(
     index=False,
@@ -425,12 +451,11 @@ csv = df.to_csv(
 )
 
 st.download_button(
-    label="Download Grouped Movie Data (CSV)",
+    "Download Movie Group Data (CSV)",
     data=csv,
     file_name="movie_types.csv",
     mime="text/csv"
 )
 
-st.success(
-    "Movie clustering completed successfully!"
-)
+st.success("Movie clustering completed successfully!")
+```
