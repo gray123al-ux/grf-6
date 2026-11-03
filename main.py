@@ -64,13 +64,15 @@ st.markdown(
 # LOAD DATA
 # ==========================================
 @st.cache_data
-def load_data():
-    data = pd.read_csv(DATA_URL, encoding="utf-8")
+df["log_first_scrn"] = df["first_scrn"].map(
+    lambda value: __import__("math").log10(value)
+    if pd.notna(value) and value > 0 else float("nan")
+)
 
-    required = [
-        "movieCd", "movieNm", "first_scrn",
-        "first_week_audi", "total_audi", "days_in_top10"
-    ]
+df["log_total_audi"] = df["total_audi"].map(
+    lambda value: __import__("math").log10(value)
+    if pd.notna(value) and value > 0 else float("nan")
+)
 
     missing = [c for c in required if c not in data.columns]
 
