@@ -36,7 +36,7 @@ FEATURE_NAMES = {
     "long_run_index": "Long-run Index"
 }
 
-GROUP_LABELS = ["㉮", "㉯", "㉰"]
+LABEL_SYMBOLS = ["㉮", "㉯", "㉰", "㉱", "㉲", "㉳", "㉴"]
 
 
 # ==================================================
@@ -74,7 +74,9 @@ st.markdown(
     unsafe_allow_html=True
 )
 st.markdown(
-    '<div class="subtitle">Discover movie patterns with K-Means clustering</div>',
+    '<div class="subtitle">'
+    'Discover movie patterns with K-Means clustering'
+    '</div>',
     unsafe_allow_html=True
 )
 
@@ -114,7 +116,7 @@ def load_data(url):
             errors="coerce"
         )
 
-    # Safe logarithms: no math module required
+    # Logarithmic features
     df["log_first_scrn"] = np.log10(
         df["first_scrn"].where(df["first_scrn"] > 0)
     )
@@ -131,20 +133,28 @@ def load_data(url):
         )
     ).clip(upper=20)
 
-    # Keep only complete, valid observations
+    # Remove missing and invalid observations
+    feature_columns = [
+        "log_first_scrn",
+        "log_total_audi",
+        "days_in_top10",
+        "long_run_index"
+    ]
+
     usable_df = df.dropna(
-        subset=[
-            "log_first_scrn",
-            "log_total_audi",
-            "days_in_top10",
-            "long_run_index"
-        ]
+        subset=feature_columns + ["movieNm"]
     ).copy()
 
     usable_df = usable_df[
         (usable_df["first_scrn"] > 0) &
         (usable_df["total_audi"] > 0) &
-        (usable_df["first_week_audi"] > 0)
+        (usable_df["first_week_audi"] > 0) &
+        (usable_df["days_in_top10"] >= 0)
+    ].copy()
+
+    # Remove infinite values
+    usable_df = usable_df[
+        np.isfinite(usable_df[feature_columns]).all(axis=1)
     ].copy()
 
     return df, usable_df, total_movies
@@ -159,7 +169,7 @@ try:
 
 except Exception as error:
     st.error("Could not load or process the movie data.")
-    st.write("Check the CSV URL and column names.")
+    st.write("Check the CSV URL, internet connection, and column names.")
     st.exception(error)
     st.stop()
 
@@ -196,8 +206,13 @@ st.caption(
 st.divider()
 st.header("1. Choose Your Features")
 
+st.write(
+    "Choose the movie characteristics that K-Means will use "
+    "to create groups."
+)
+
 selected_features = st.multiselect(
-    "Select at least two attributes for clustering:",
+    "Select at least two attributes:",
     options=list(FEATURE_NAMES.keys()),
     default=list(FEATURE_NAMES.keys()),
     format_func=lambda x: FEATURE_NAMES[x]
@@ -209,21 +224,7 @@ if len(selected_features) < 2:
 
 
 # ==================================================
-# CLUSTER COUNT
-# ==================================================
-
-st.header("2. Choose the Number of Movie Groups")
-
-n_clusters = st.slider(
-    "Number of groups",
-    min_value=2,
-    max_value=min(7, len(usable_df)),
-    value=min(3, len(usable_df))
-)
-
-
-# ==================================================
-# K-MEANS CLUSTERING
+# PREPARE DATA AND CHECK CLUSTER LIMIT
 # ==================================================
 
 X = usable_df[selected_features].copy()
@@ -231,12 +232,116 @@ X = usable_df[selected_features].copy()
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 
+unique_rows = np.unique(X_scaled, axis=0).shape[0]
+
+max_clusters = min(
+    7,
+    len(usable_df),
+    unique_rows
+)
+
+if max_clusters < 2:
+    st.error("There are not enough distinct movie records to create groups.")
+    st.stop()
+
+
+# ==================================================
+# ELBOW METHOD
+# ==================================================
+
+st.divider()
+st.header("2. Find a Suitable Number of Groups")
+
+st.write(
+    "The Elbow Method compares the within-group sum of squared "
+    "distances (inertia) for different group counts. "
+    "Look for a point where the decrease begins to slow down."
+)
+
+elbow_values = []
+
+for k in range(1, max_clusters + 1):
+
+    elbow_model = KMeans(
+        n_clusters=k,
+        random_state=42,
+        n_init=10
+    )
+
+    elbow_model.fit(X_scaled)
+
+    elbow_values.append({
+        "Number of Groups": k,
+        "Inertia": elbow_model.inertia_
+    })
+
+elbow_df = pd.DataFrame(elbow_values)
+
+fig_elbow = px.line(
+    elbow_df,
+    x="Number of Groups",
+    y="Inertia",
+    markers=True,
+    title="Elbow Method"
+)
+
+fig_elbow.update_layout(height=420)
+
+st.plotly_chart(
+    fig_elbow,
+    use_container_width=True
+)
+
+# Calculate reduction from previous group count
+elbow_df["Reduction"] = elbow_df["Inertia"].shift(1) - elbow_df["Inertia"]
+
+elbow_df["Reduction (%)"] = (
+    elbow_df["Reduction"] /
+    elbow_df["Inertia"].shift(1) * 100
+)
+
+st.dataframe(
+    elbow_df.style.format({
+        "Inertia": "{:,.2f}",
+        "Reduction": "{:,.2f}",
+        "Reduction (%)": "{:.1f}%"
+    }),
+    use_container_width=True,
+    hide_index=True
+)
+
+st.caption(
+    "A larger reduction means adding another group improved "
+    "the clustering more. The elbow is a guide, not an automatic answer."
+)
+
+
+# ==================================================
+# CLUSTER COUNT
+# ==================================================
+
+st.header("3. Choose the Number of Movie Groups")
+
+n_clusters = st.slider(
+    "Number of groups",
+    min_value=2,
+    max_value=max_clusters,
+    value=min(3, max_clusters),
+    help="Choose a group count based on the Elbow Method and your analysis."
+)
+
+
+# ==================================================
+# K-MEANS CLUSTERING
+# ==================================================
+
 model = KMeans(
     n_clusters=n_clusters,
     random_state=42,
     n_init=10
 )
 
+usable_df = usable_df.copy()
 usable_df["cluster"] = model.fit_predict(X_scaled)
 
 # Sort groups by average total audience
@@ -247,18 +352,12 @@ cluster_order = (
     .index.tolist()
 )
 
-label_symbols = [
-    "㉮", "㉯", "㉰", "㉱", "㉲", "㉳", "㉴"
-]
-
 cluster_mapping = {
-    cluster: label_symbols[index]
+    cluster: LABEL_SYMBOLS[index]
     for index, cluster in enumerate(cluster_order)
 }
 
-usable_df["group"] = usable_df["cluster"].map(
-    cluster_mapping
-)
+usable_df["group"] = usable_df["cluster"].map(cluster_mapping)
 
 group_order = [
     cluster_mapping[cluster]
@@ -267,11 +366,29 @@ group_order = [
 
 
 # ==================================================
+# CLUSTER OVERVIEW
+# ==================================================
+
+st.divider()
+st.header("4. Clustering Results")
+
+st.success(
+    f"Created {n_clusters} movie groups from "
+    f"{len(usable_df):,} usable movies."
+)
+
+st.caption(
+    "Group labels are ordered by average total audience. "
+    "Group ㉮ has the highest average total audience."
+)
+
+
+# ==================================================
 # 2D SCATTER PLOT
 # ==================================================
 
 st.divider()
-st.header("3. Two-Dimensional Movie Map")
+st.header("5. Two-Dimensional Movie Map")
 
 left, right = st.columns(2)
 
@@ -280,56 +397,66 @@ with left:
         "Horizontal axis",
         selected_features,
         index=0,
-        format_func=lambda x: FEATURE_NAMES[x]
+        format_func=lambda x: FEATURE_NAMES[x],
+        key="x_feature"
     )
 
 with right:
+    y_default = 1 if selected_features[1] != x_feature else 0
+
     y_feature = st.selectbox(
         "Vertical axis",
         selected_features,
-        index=1,
-        format_func=lambda x: FEATURE_NAMES[x]
+        index=y_default,
+        format_func=lambda x: FEATURE_NAMES[x],
+        key="y_feature"
     )
 
-fig_2d = px.scatter(
-    usable_df,
-    x=x_feature,
-    y=y_feature,
-    color="group",
-    hover_name="movieNm",
-    hover_data={
-        "first_scrn": ":,",
-        "first_week_audi": ":,",
-        "total_audi": ":,",
-        "days_in_top10": True,
-        "long_run_index": ":.2f"
-    },
-    category_orders={"group": group_order},
-    labels={
-        x_feature: FEATURE_NAMES[x_feature],
-        y_feature: FEATURE_NAMES[y_feature],
-        "group": "Movie Group"
-    },
-    title="Movie Groups by Selected Features"
-)
+if x_feature == y_feature:
+    st.warning(
+        "Choose different features for the horizontal and vertical axes."
+    )
+else:
+    fig_2d = px.scatter(
+        usable_df,
+        x=x_feature,
+        y=y_feature,
+        color="group",
+        hover_name="movieNm",
+        hover_data={
+            "first_scrn": ":,",
+            "first_week_audi": ":,",
+            "total_audi": ":,",
+            "days_in_top10": True,
+            "long_run_index": ":.2f"
+        },
+        category_orders={"group": group_order},
+        labels={
+            x_feature: FEATURE_NAMES[x_feature],
+            y_feature: FEATURE_NAMES[y_feature],
+            "group": "Movie Group"
+        },
+        title="Movie Groups by Selected Features"
+    )
 
-fig_2d.update_traces(
-    marker=dict(size=9, opacity=0.8)
-)
+    fig_2d.update_traces(
+        marker=dict(size=9, opacity=0.8)
+    )
 
-fig_2d.update_layout(height=600)
+    fig_2d.update_layout(height=600)
 
-st.plotly_chart(
-    fig_2d,
-    use_container_width=True
-)
+    st.plotly_chart(
+        fig_2d,
+        use_container_width=True
+    )
 
-st.markdown(
-    '<div class="section-note">'
-    '💡 Movies close together have similar values for the selected features.'
-    '</div>',
-    unsafe_allow_html=True
-)
+    st.markdown(
+        '<div class="section-note">'
+        '💡 Movies close together have similar values '
+        'for the selected features.'
+        '</div>',
+        unsafe_allow_html=True
+    )
 
 
 # ==================================================
@@ -337,47 +464,84 @@ st.markdown(
 # ==================================================
 
 st.divider()
-st.header("4. Three-Dimensional Movie Map")
+st.header("6. Three-Dimensional Movie Map")
 
 if len(selected_features) >= 3:
 
-    z_features = selected_features[:3]
+    col1, col2, col3 = st.columns(3)
 
-    fig_3d = px.scatter_3d(
-        usable_df,
-        x=z_features[0],
-        y=z_features[1],
-        z=z_features[2],
-        color="group",
-        hover_name="movieNm",
-        category_orders={"group": group_order},
-        labels={
-            z_features[0]: FEATURE_NAMES[z_features[0]],
-            z_features[1]: FEATURE_NAMES[z_features[1]],
-            z_features[2]: FEATURE_NAMES[z_features[2]],
-            "group": "Movie Group"
-        },
-        title="3D Movie Group Distribution"
-    )
+    with col1:
+        z_x = st.selectbox(
+            "3D X axis",
+            selected_features,
+            index=0,
+            format_func=lambda x: FEATURE_NAMES[x],
+            key="3d_x"
+        )
 
-    fig_3d.update_traces(
-        marker=dict(size=3, opacity=0.8)
-    )
+    with col2:
+        z_y = st.selectbox(
+            "3D Y axis",
+            selected_features,
+            index=1,
+            format_func=lambda x: FEATURE_NAMES[x],
+            key="3d_y"
+        )
 
-    fig_3d.update_layout(
-        height=700,
-        scene=dict(aspectmode="cube")
-    )
+    with col3:
+        z_z = st.selectbox(
+            "3D Z axis",
+            selected_features,
+            index=2,
+            format_func=lambda x: FEATURE_NAMES[x],
+            key="3d_z"
+        )
 
-    st.plotly_chart(
-        fig_3d,
-        use_container_width=True
-    )
+    if len({z_x, z_y, z_z}) < 3:
+        st.warning("Choose three different features for the 3D graph.")
+    else:
+        fig_3d = px.scatter_3d(
+            usable_df,
+            x=z_x,
+            y=z_y,
+            z=z_z,
+            color="group",
+            hover_name="movieNm",
+            hover_data={
+                "total_audi": ":,",
+                "first_week_audi": ":,",
+                "days_in_top10": True
+            },
+            category_orders={"group": group_order},
+            labels={
+                z_x: FEATURE_NAMES[z_x],
+                z_y: FEATURE_NAMES[z_y],
+                z_z: FEATURE_NAMES[z_z],
+                "group": "Movie Group"
+            },
+            title="3D Movie Group Distribution"
+        )
 
-    st.caption("Drag the graph to rotate the 3D view.")
+        fig_3d.update_traces(
+            marker=dict(size=4, opacity=0.8)
+        )
+
+        fig_3d.update_layout(
+            height=700,
+            scene=dict(aspectmode="cube")
+        )
+
+        st.plotly_chart(
+            fig_3d,
+            use_container_width=True
+        )
+
+        st.caption("Drag the graph to rotate the 3D view.")
 
 else:
-    st.info("Select at least three features to display the 3D graph.")
+    st.info(
+        "Select at least three features to display the 3D graph."
+    )
 
 
 # ==================================================
@@ -385,7 +549,7 @@ else:
 # ==================================================
 
 st.divider()
-st.header("5. Compare Movie Groups")
+st.header("7. Compare Movie Groups")
 
 summary = (
     usable_df.groupby("group")
@@ -423,11 +587,11 @@ st.dataframe(
 
 
 # ==================================================
-# TOP FIVE MOVIES IN EACH GROUP
+# REPRESENTATIVE MOVIES
 # ==================================================
 
 st.divider()
-st.header("6. Representative Movies")
+st.header("8. Representative Movies")
 
 for group in group_order:
 
@@ -485,13 +649,14 @@ st.divider()
 st.header("💡 Explore the Results")
 
 st.markdown("""
-Think about these questions:
+Use these questions to interpret your results:
 
 - What characteristics do movies in Group ㉮ share?
 - How are Groups ㉯ and ㉰ different?
 - Do movies with more opening screens always attract more viewers?
-- Can a movie with a small opening audience have a high long-run index?
-- How does changing the selected features affect the groups?
+- Can a movie with a small first-week audience have a high long-run index?
+- What happens when you change the selected features?
+- Does the Elbow Method suggest the same number of groups you selected?
 """)
 
 st.caption(
