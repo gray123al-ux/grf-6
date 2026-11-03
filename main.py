@@ -1,607 +1,489 @@
-import math
-import warnings
 
+import streamlit as st
 import pandas as pd
 import plotly.express as px
-import streamlit as st
+import math
+
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
 
-# ==========================================
-# 1. PAGE SETTINGS
-# ==========================================
+# --------------------------------------------------
+# 기본 설정
+# --------------------------------------------------
+
 st.set_page_config(
     page_title="Sort Movie Types",
     page_icon="🎬",
     layout="wide"
 )
 
-DATA_URL = (
-    "https://raw.githubusercontent.com/"
-    "it-teacher-go/data-share-/main/kobis_movies.csv"
-)
+st.title("🎬 Sort Movie Types")
+st.caption("KOBIS 영화 데이터를 이용해 영화의 유형을 찾아보는 클러스터링 실험실")
 
-RANDOM_STATE = 42
 
-st.markdown("""
-<style>
-.main-title {
-    font-size: 2.7rem;
-    font-weight: 800;
-    padding-bottom: 0;
+DATA_URL = "https://raw.githubusercontent.com/it-teacher-go/data-share-/main/kobis_movies.csv"
+
+REQUIRED_COLUMNS = [
+    "movieCd",
+    "movieNm",
+    "openDt",
+    "genre",
+    "nation",
+    "first_scrn",
+    "first_show",
+    "first_date",
+    "peak",
+    "first_week_audi",
+    "total_audi",
+    "days_in_top10"
+]
+
+FEATURES = {
+    "log_first_scrn": "개봉 스크린 수 (로그)",
+    "log_total_audi": "총 관객 수 (로그)",
+    "days_in_top10": "10위권에 머문 날수",
+    "long_run_index": "롱런 지수"
 }
-.subtitle {
-    color: #9CA3AF;
-    font-size: 1rem;
-    margin-bottom: 25px;
-}
-div[data-testid="stMetric"] {
-    background: rgba(128,128,128,0.08);
-    padding: 15px;
-    border-radius: 12px;
-}
-</style>
-""", unsafe_allow_html=True)
 
-
-# ==========================================
-# 2. TITLE
-# ==========================================
-st.markdown(
-    '<div class="main-title">🎬 Sort Movie Types</div>',
-    unsafe_allow_html=True
-)
-
-st.markdown(
-    '<div class="subtitle">'
-    'Group similar movies by opening scale and box-office longevity.'
-    '</div>',
-    unsafe_allow_html=True
-)
-
-st.caption(
-    "영화의 개봉 규모와 흥행 지속성을 바탕으로 "
-    "비슷한 영화끼리 묶어 봅니다."
-)
-
-
-# ==========================================
-# 3. LOAD DATA
-# ==========================================
-@st.cache_data
-def load_data(url):
-
-    data = pd.read_csv(url, encoding="utf-8")
-
-    required = [
-        "movieCd",
-        "movieNm",
-        "openDt",
-        "genre",
-        "nation",
-        "first_scrn",
-        "first_show",
-        "first_date",
-        "peak",
-        "first_week_audi",
-        "total_audi",
-        "days_in_top10"
-    ]
-
-    missing = [
-        column for column in required
-        if column not in data.columns
-    ]
-
-    if missing:
-        raise ValueError(
-            f"CSV에 필요한 열이 없습니다: {missing}"
-        )
-
-    numeric_columns = [
-        "first_scrn",
-        "first_week_audi",
-        "total_audi",
-        "days_in_top10"
-    ]
-
-    for column in numeric_columns:
-        data[column] = pd.to_numeric(
-            data[column]
-            .astype(str)
-            .str.replace(",", "", regex=False)
-            .str.strip(),
-            errors="coerce"
-        )
-
-    total_movies = len(data)
-
-    # Make a working copy
-    df = data.copy()
-
-    # Common logarithm of opening screen count
-    df["log_first_scrn"] = df["first_scrn"].apply(
-        lambda value: math.log10(value)
-        if pd.notna(value) and value > 0
-        else float("nan")
-    )
-
-    # Common logarithm of cumulative audience
-    df["log_total_audi"] = df["total_audi"].apply(
-        lambda value: math.log10(value)
-        if pd.notna(value) and value > 0
-        else float("nan")
-    )
-
-    # Long-run index
-    df["long_run_index"] = (
-        df["total_audi"] /
-        df["first_week_audi"].where(
-            df["first_week_audi"] > 0
-        )
-    ).clip(upper=20)
-
-    attributes = [
-        "log_first_scrn",
-        "log_total_audi",
-        "days_in_top10",
-        "long_run_index"
-    ]
-
-    # Exclude movies with missing or invalid attributes
-    df = df.dropna(subset=attributes)
-
-    df = df[
-        (df["first_week_audi"] > 0) &
-        (df["first_scrn"] > 0) &
-        (df["total_audi"] > 0)
-    ].copy()
-
-    df["movieNm"] = (
-        df["movieNm"]
-        .fillna("Unknown Movie")
-        .astype(str)
-    )
-
-    return data, df, total_movies
-
-
-try:
-    original_df, df, total_movies = load_data(DATA_URL)
-
-except Exception as error:
-    st.error(
-        "데이터를 불러오거나 처리하지 못했습니다. "
-        "데이터 주소와 CSV 열 이름을 확인해 주세요."
-    )
-
-    st.exception(error)
-    st.stop()
-
-
-# ==========================================
-# 4. ATTRIBUTE INFORMATION
-# ==========================================
-attributes = [
-    "log_first_scrn",
-    "log_total_audi",
+ORIGINAL_FEATURES = [
+    "first_scrn",
+    "total_audi",
     "days_in_top10",
     "long_run_index"
 ]
 
-attribute_names = {
-    "log_first_scrn": "Log10(Number of Screens)",
-    "log_total_audi": "Log10(Cumulative Audience)",
-    "days_in_top10": "Days in Top 10",
-    "long_run_index": "Long-run Index"
-}
 
-valid_count = len(df)
-excluded_count = total_movies - valid_count
+# --------------------------------------------------
+# 데이터 불러오기 및 전처리
+# --------------------------------------------------
+
+@st.cache_data
+def load_data(url):
+
+    df = pd.read_csv(url, encoding="utf-8-sig")
+
+    missing_columns = [
+        col for col in REQUIRED_COLUMNS
+        if col not in df.columns
+    ]
+
+    if missing_columns:
+        raise ValueError(
+            "CSV에 필요한 열이 없습니다: "
+            + ", ".join(missing_columns)
+        )
+
+    total_movies = len(df)
+
+    numeric_columns = [
+        "first_scrn",
+        "first_show",
+        "first_week_audi",
+        "total_audi",
+        "days_in_top10"
+    ]
+
+    for col in numeric_columns:
+        df[col] = pd.to_numeric(
+            df[col],
+            errors="coerce"
+        )
+
+    # 로그 계산에 필요한 값은 양수여야 함
+    df["log_first_scrn"] = df["first_scrn"].map(
+        lambda value: math.log10(value)
+        if pd.notna(value) and value > 0
+        else float("nan")
+    )
+
+    df["log_total_audi"] = df["total_audi"].map(
+        lambda value: math.log10(value)
+        if pd.notna(value) and value > 0
+        else float("nan")
+    )
+
+    # 롱런 지수 = 총 관객 / 첫 주 관객
+    # 최대값은 20으로 제한
+    df["long_run_index"] = (
+        df["total_audi"] / df["first_week_audi"]
+    ).clip(upper=20)
+
+    # 필요한 값이 모두 있는 영화만 사용
+    usable_df = df.dropna(
+        subset=[
+            "log_first_scrn",
+            "log_total_audi",
+            "days_in_top10",
+            "long_run_index"
+        ]
+    ).copy()
+
+    # 0 이하의 잘못된 값 제외
+    usable_df = usable_df[
+        (usable_df["first_scrn"] > 0)
+        & (usable_df["total_audi"] > 0)
+        & (usable_df["first_week_audi"] > 0)
+    ].copy()
+
+    return df, usable_df, total_movies
 
 
-# ==========================================
-# 5. DATA SUMMARY
-# ==========================================
-st.subheader("📊 Dataset Overview")
+# --------------------------------------------------
+# 데이터 불러오기
+# --------------------------------------------------
 
-st.markdown(
-    f"**Total movies: {total_movies:,}**　|　"
-    f"**Movies available for grouping: {valid_count:,}**"
-)
+try:
+    original_df, usable_df, total_movies = load_data(DATA_URL)
+
+except Exception as e:
+    st.error("데이터를 불러오거나 처리하지 못했습니다.")
+    st.write("데이터 주소와 CSV 열 이름을 확인해 주세요.")
+    st.exception(e)
+    st.stop()
+
+
+# --------------------------------------------------
+# 데이터 요약
+# --------------------------------------------------
+
+st.subheader("📊 데이터 요약")
 
 col1, col2, col3 = st.columns(3)
 
-col1.metric("Total Movies", f"{total_movies:,}")
-col2.metric("Valid Movies", f"{valid_count:,}")
-col3.metric("Excluded Movies", f"{excluded_count:,}")
+col1.metric("전체 영화 수", f"{total_movies:,}편")
+col2.metric("분석 가능한 영화", f"{len(usable_df):,}편")
+col3.metric(
+    "제외된 영화",
+    f"{total_movies - len(usable_df):,}편"
+)
 
 st.caption(
-    "Movies with missing or invalid attributes, "
-    "or zero first-week audience, are excluded."
+    "필요한 분석 값이 없거나 스크린 수, 관객 수, 첫 주 관객 수가 "
+    "0 이하인 영화는 분석에서 제외합니다."
 )
+
+if len(usable_df) < 3:
+    st.error("클러스터링을 수행하려면 분석 가능한 영화가 최소 3편 필요합니다.")
+    st.stop()
+
+
+# --------------------------------------------------
+# 분석할 속성 선택
+# --------------------------------------------------
 
 st.divider()
+st.subheader("1. 분석할 속성 선택")
 
-if valid_count < 3:
-    st.error(
-        "At least three valid movies are required "
-        "for three-group clustering."
-    )
-    st.stop()
-
-
-# ==========================================
-# 6. SELECT ATTRIBUTES
-# ==========================================
-st.subheader("1. Choose Clustering Attributes")
-
-selected = st.multiselect(
-    "Select at least two attributes:",
-    options=attributes,
-    default=attributes,
-    format_func=lambda x: attribute_names[x]
+selected_features = st.multiselect(
+    "영화 유형을 나눌 때 사용할 속성을 선택하세요. (최소 2개)",
+    options=list(FEATURES.keys()),
+    default=list(FEATURES.keys()),
+    format_func=lambda x: FEATURES[x]
 )
 
-if len(selected) < 2:
-    st.warning("Please select at least two attributes.")
+if len(selected_features) < 2:
+    st.warning("클러스터링을 하려면 속성을 최소 2개 선택해야 합니다.")
     st.stop()
 
 
-# ==========================================
-# 7. K-MEANS CLUSTERING
-# ==========================================
-X = df[selected].astype(float)
+# --------------------------------------------------
+# K-Means 클러스터링
+# --------------------------------------------------
+
+st.divider()
+st.subheader("2. 영화 유형 분석")
+
+n_clusters = 3
+
+if len(usable_df) < n_clusters:
+    st.error("그룹 수보다 분석 가능한 영화 수가 적습니다.")
+    st.stop()
+
+X = usable_df[selected_features].copy()
 
 scaler = StandardScaler()
-
 X_scaled = scaler.fit_transform(X)
 
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
+model = KMeans(
+    n_clusters=n_clusters,
+    random_state=42,
+    n_init=10
+)
 
-    kmeans = KMeans(
-        n_clusters=3,
-        random_state=RANDOM_STATE,
-        n_init=10
-    )
+usable_df["cluster"] = model.fit_predict(X_scaled)
 
-    df["cluster"] = kmeans.fit_predict(X_scaled)
-
-
-# ==========================================
-# 8. RANK GROUPS
-# ==========================================
+# 총 관객 평균이 높은 그룹부터 ㉮, ㉯, ㉰ 배정
 cluster_order = (
-    df.groupby("cluster")["total_audi"]
+    usable_df.groupby("cluster")["total_audi"]
     .mean()
     .sort_values(ascending=False)
     .index.tolist()
 )
 
-symbols = ["㉮", "㉯", "㉰"]
+group_labels = ["㉮", "㉯", "㉰"]
 
-group_mapping = {
-    cluster: symbols[index]
-    for index, cluster in enumerate(cluster_order)
+cluster_to_group = {
+    cluster: group_labels[i]
+    for i, cluster in enumerate(cluster_order)
 }
 
-df["Group"] = df["cluster"].map(group_mapping)
-
-actual_groups = df["cluster"].nunique()
-
-st.success(
-    f"Clustering complete: {valid_count:,} movies "
-    f"were processed into {actual_groups} groups."
+usable_df["group"] = usable_df["cluster"].map(
+    cluster_to_group
 )
 
-if actual_groups < 3:
-    st.warning(
-        "Fewer than three distinct groups were produced. "
-        "Some movies have very similar attribute values."
-    )
 
+# --------------------------------------------------
+# 3. 2차원 산점도
+# --------------------------------------------------
 
-# ==========================================
-# 9. 2D SCATTER PLOT
-# ==========================================
 st.divider()
+st.subheader("3. 2차원 산점도")
 
-st.subheader("2. Two-dimensional Movie Map")
+axis_col1, axis_col2 = st.columns(2)
 
-col1, col2 = st.columns(2)
-
-with col1:
-    x_axis = st.selectbox(
-        "Horizontal axis (X)",
-        selected,
+with axis_col1:
+    x_feature = st.selectbox(
+        "가로축(X축)",
+        selected_features,
         index=0,
-        format_func=lambda x: attribute_names[x],
-        key="axis_x"
+        format_func=lambda x: FEATURES[x]
     )
 
-with col2:
-    y_axis = st.selectbox(
-        "Vertical axis (Y)",
-        selected,
-        index=1,
-        format_func=lambda x: attribute_names[x],
-        key="axis_y"
+with axis_col2:
+    default_y = 1 if len(selected_features) > 1 else 0
+
+    y_feature = st.selectbox(
+        "세로축(Y축)",
+        selected_features,
+        index=default_y,
+        format_func=lambda x: FEATURES[x]
     )
 
-fig2d = px.scatter(
-    df,
-    x=x_axis,
-    y=y_axis,
-    color="Group",
-    category_orders={
-        "Group": symbols
-    },
+fig_2d = px.scatter(
+    usable_df,
+    x=x_feature,
+    y=y_feature,
+    color="group",
     hover_name="movieNm",
-    hover_data=[
-        "Group",
-        "first_scrn",
-        "total_audi",
-        "first_week_audi",
-        "days_in_top10",
-        "long_run_index"
-    ],
-    labels={
-        x_axis: attribute_names[x_axis],
-        y_axis: attribute_names[y_axis],
-        "Group": "Movie Group",
-        "movieNm": "Movie Title"
+    hover_data={
+        "first_scrn": ":,",
+        "total_audi": ":,",
+        "days_in_top10": True,
+        "long_run_index": ":.2f",
+        "group": True
     },
-    title="Movie Type Distribution"
+    category_orders={
+        "group": group_labels
+    },
+    labels={
+        x_feature: FEATURES[x_feature],
+        y_feature: FEATURES[y_feature],
+        "group": "영화 유형"
+    },
+    title="속성에 따른 영화 유형 분포"
 )
 
-fig2d.update_traces(
-    marker=dict(
-        size=9,
-        opacity=0.8
-    )
+fig_2d.update_traces(
+    marker=dict(size=9, opacity=0.75)
 )
 
-fig2d.update_layout(
-    height=570,
-    legend_title="Movie Groups",
-    margin=dict(
-        l=20,
-        r=20,
-        t=60,
-        b=20
-    )
+fig_2d.update_layout(
+    height=600,
+    legend_title_text="영화 유형"
 )
 
 st.plotly_chart(
-    fig2d,
+    fig_2d,
     use_container_width=True
 )
 
+st.info(
+    "그래프에서 가까이 모여 있는 영화들은 선택한 속성의 특징이 "
+    "서로 비슷한 영화들입니다."
+)
 
-# ==========================================
-# 10. 3D SCATTER PLOT
-# ==========================================
+
+# --------------------------------------------------
+# 4. 3차원 산점도
+# --------------------------------------------------
+
 st.divider()
+st.subheader("4. 3차원 산점도")
 
-st.subheader("3. Three-dimensional Movie Map")
+if len(selected_features) >= 3:
 
-if len(selected) < 3:
+    three_features = selected_features[:3]
 
-    st.info(
-        "💡 Select at least three attributes above "
-        "to display the 3D movie map."
-    )
-
-else:
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        x3 = st.selectbox(
-            "3D X axis",
-            selected,
-            index=0,
-            format_func=lambda x: attribute_names[x],
-            key="axis_3d_x"
-        )
-
-    with col2:
-        y3 = st.selectbox(
-            "3D Y axis",
-            selected,
-            index=1,
-            format_func=lambda x: attribute_names[x],
-            key="axis_3d_y"
-        )
-
-    with col3:
-        z3 = st.selectbox(
-            "3D Z axis",
-            selected,
-            index=2,
-            format_func=lambda x: attribute_names[x],
-            key="axis_3d_z"
-        )
-
-    fig3d = px.scatter_3d(
-        df,
-        x=x3,
-        y=y3,
-        z=z3,
-        color="Group",
-        category_orders={
-            "Group": symbols
-        },
+    fig_3d = px.scatter_3d(
+        usable_df,
+        x=three_features[0],
+        y=three_features[1],
+        z=three_features[2],
+        color="group",
         hover_name="movieNm",
-        hover_data=[
-            "Group",
-            "first_scrn",
-            "total_audi",
-            "first_week_audi",
-            "days_in_top10",
-            "long_run_index"
-        ],
-        labels={
-            x3: attribute_names[x3],
-            y3: attribute_names[y3],
-            z3: attribute_names[z3],
-            "Group": "Movie Group"
+        category_orders={
+            "group": group_labels
         },
-        title="3D Movie Type Distribution"
+        labels={
+            three_features[0]: FEATURES[three_features[0]],
+            three_features[1]: FEATURES[three_features[1]],
+            three_features[2]: FEATURES[three_features[2]],
+            "group": "영화 유형"
+        },
+        title="3차원 영화 유형 분포"
     )
 
-    fig3d.update_traces(
-        marker=dict(
-            size=3,
-            opacity=0.8
-        )
+    fig_3d.update_traces(
+        marker=dict(size=3, opacity=0.8)
     )
 
-    fig3d.update_layout(
+    fig_3d.update_layout(
         height=700,
         scene=dict(
-            aspectmode="cube",
-            xaxis_title=attribute_names[x3],
-            yaxis_title=attribute_names[y3],
-            zaxis_title=attribute_names[z3]
+            aspectmode="cube"
         ),
-        margin=dict(
-            l=0,
-            r=0,
-            t=60,
-            b=0
-        )
+        legend_title_text="영화 유형"
     )
 
     st.plotly_chart(
-        fig3d,
-        use_container_width=True,
-        config={
-            "scrollZoom": True
-        }
+        fig_3d,
+        use_container_width=True
+    )
+
+    st.caption(
+        "마우스로 그래프를 드래그하면 3차원 공간을 회전할 수 있습니다."
+    )
+
+else:
+    st.info(
+        "3차원 그래프를 보려면 분석 속성을 3개 이상 선택하세요."
     )
 
 
-# ==========================================
-# 11. GROUP STATISTICS
-# ==========================================
-st.divider()
+# --------------------------------------------------
+# 5. 그룹별 특징 비교
+# --------------------------------------------------
 
-st.subheader("4. Compare Movie Groups")
+st.divider()
+st.subheader("5. 그룹별 특징 비교")
 
 summary = (
-    df.groupby("Group")
+    usable_df.groupby("group")
     .agg(
-        Movie_Count=("movieNm", "count"),
-        Average_Screens=("first_scrn", "mean"),
-        Average_Total_Audience=("total_audi", "mean"),
-        Average_Days_Top10=("days_in_top10", "mean"),
-        Average_Long_Run_Index=("long_run_index", "mean")
+        영화수=("movieNm", "count"),
+        평균_개봉스크린수=("first_scrn", "mean"),
+        평균_총관객수=("total_audi", "mean"),
+        평균_10위권날수=("days_in_top10", "mean"),
+        평균_롱런지수=("long_run_index", "mean")
     )
-    .reindex(symbols)
-    .dropna(how="all")
+    .reindex(group_labels)
     .reset_index()
 )
 
 summary = summary.rename(
     columns={
-        "Group": "Group",
-        "Movie_Count": "Number of Movies",
-        "Average_Screens": "Average Screens",
-        "Average_Total_Audience": "Average Cumulative Audience",
-        "Average_Days_Top10": "Average Days in Top 10",
-        "Average_Long_Run_Index": "Average Long-run Index"
+        "group": "영화 유형",
+        "영화수": "영화 수",
+        "평균_개봉스크린수": "평균 개봉 스크린 수",
+        "평균_총관객수": "평균 총 관객 수",
+        "평균_10위권날수": "평균 10위권 날수",
+        "평균_롱런지수": "평균 롱런 지수"
     }
-)
-
-st.caption(
-    "The following averages use original units, "
-    "not logarithms or standardized values."
 )
 
 st.dataframe(
     summary.style.format({
-        "Number of Movies": "{:,.0f}",
-        "Average Screens": "{:,.1f}",
-        "Average Cumulative Audience": "{:,.0f}",
-        "Average Days in Top 10": "{:,.1f}",
-        "Average Long-run Index": "{:.2f}"
+        "영화 수": "{:,.0f}",
+        "평균 개봉 스크린 수": "{:,.0f}",
+        "평균 총 관객 수": "{:,.0f}",
+        "평균 10위권 날수": "{:.1f}",
+        "평균 롱런 지수": "{:.2f}"
     }),
     use_container_width=True,
     hide_index=True
 )
 
 
-# ==========================================
-# 12. TOP FIVE MOVIES IN EACH GROUP
-# ==========================================
+# --------------------------------------------------
+# 6. 그룹별 대표 영화 TOP 5
+# --------------------------------------------------
+
+st.divider()
+st.subheader("6. 그룹별 대표 영화 TOP 5")
+
+for group in group_labels:
+
+    group_df = usable_df[
+        usable_df["group"] == group
+    ].sort_values(
+        "total_audi",
+        ascending=False
+    ).head(5)
+
+    if group == "㉮":
+        group_title = "㉮ 총 관객 수가 가장 높은 그룹"
+    elif group == "㉯":
+        group_title = "㉯ 두 번째 그룹"
+    else:
+        group_title = "㉰ 세 번째 그룹"
+
+    with st.expander(group_title, expanded=True):
+
+        if group_df.empty:
+            st.write("해당 그룹에 영화가 없습니다.")
+        else:
+            display_df = group_df[
+                [
+                    "movieNm",
+                    "genre",
+                    "first_scrn",
+                    "first_week_audi",
+                    "total_audi",
+                    "days_in_top10",
+                    "long_run_index"
+                ]
+            ].rename(
+                columns={
+                    "movieNm": "영화명",
+                    "genre": "장르",
+                    "first_scrn": "개봉 스크린 수",
+                    "first_week_audi": "첫 주 관객 수",
+                    "total_audi": "총 관객 수",
+                    "days_in_top10": "10위권 날수",
+                    "long_run_index": "롱런 지수"
+                }
+            )
+
+            st.dataframe(
+                display_df.style.format({
+                    "개봉 스크린 수": "{:,.0f}",
+                    "첫 주 관객 수": "{:,.0f}",
+                    "총 관객 수": "{:,.0f}",
+                    "10위권 날수": "{:.0f}",
+                    "롱런 지수": "{:.2f}"
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
+
+
+# --------------------------------------------------
+# 마무리
+# --------------------------------------------------
+
 st.divider()
 
-st.subheader("5. Top Five Movies in Each Group")
+st.subheader("💡 분석 결과 생각해 보기")
+
+st.markdown("""
+- **㉮ 그룹**은 어떤 특징을 가진 영화들인가요?
+- **㉯ 그룹**과 **㉰ 그룹**은 무엇이 다른가요?
+- 개봉 스크린 수가 많으면 총 관객 수도 많을까요?
+- 첫 주 관객이 적어도 롱런 지수가 높은 영화가 있을까요?
+- 분석 속성을 바꾸면 영화 그룹은 어떻게 달라지나요?
+""")
 
 st.caption(
-    "Movies are ranked by cumulative audience, "
-    "from highest to lowest."
+    "KOBIS 영화 데이터를 활용한 K-Means 클러스터링 실험"
 )
-
-group_columns = st.columns(3)
-
-for index, symbol in enumerate(symbols):
-
-    group_movies = (
-        df[df["Group"] == symbol]
-        .sort_values(
-            "total_audi",
-            ascending=False
-        )
-        .head(5)
-    )
-
-    with group_columns[index]:
-
-        st.markdown(f"### {symbol}")
-
-        if group_movies.empty:
-
-            st.caption("No movies in this group.")
-
-        else:
-
-            for rank, (_, movie) in enumerate(
-                group_movies.iterrows(),
-                start=1
-            ):
-
-                st.markdown(
-                    f"**{rank}. {movie['movieNm']}**"
-                )
-
-                st.caption(
-                    f"Cumulative audience: "
-                    f"{movie['total_audi']:,.0f}"
-                )
-
-
-# ==========================================
-# 13. FOOTER
-# ==========================================
-st.divider()
-
-st.caption("""
-### Clustering Method
-
-- Algorithm: K-means
-- Number of groups: 3
-- Standardization: StandardScaler
-- Random state: 42
-- Initializations: 10
-- Screen count: log10(first_scrn)
-- Cumulative audience: log10(total_audi)
-- Days in Top 10: Original value
-- Long-run index: total_audi / first_week_audi
-- Maximum long-run index: 20
-- Group labels: ㉮, ㉯, ㉰
-- Groups ranked by average cumulative audience
-""")
